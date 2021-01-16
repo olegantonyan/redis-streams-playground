@@ -5,7 +5,7 @@ require_relative 'queue'
 q = Queue.new
 
 loop do
-  q.push((25 + rand * 5 - rand * 5).to_s)
+  q.push(Time.now.to_s)
 
-  sleep 0.1
+  sleep 1
 end

@@ -14,7 +14,7 @@ loop do
 
   q.ack(array.map(&:first))
 
-  sleep 1
+  sleep 2
 end
 
 

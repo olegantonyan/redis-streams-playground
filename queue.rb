@@ -5,11 +5,13 @@ require 'socket'
 class Queue
   def initialize
     @batch_size = 5
-    @maxlen = 1_000_000
+    @maxlen = 10
     @pool = ConnectionPool.new(size: 3, timeout: 20) { Redis.new }
 
     create_group unless group_exists?
-    reclaim
+
+    self.check_backlog = true
+    self.last_id = '0-0'
   end
 
   def push(string)
@@ -19,10 +21,14 @@ class Queue
   end
 
   def fetch
-    return [] if len.zero?
+    reclaim if check_backlog
     pool.with do |redis|
-      array = redis.xreadgroup(redis_stream_group, redis_consumer_name, redis_stream_key, '>', count: batch_size).fetch(redis_stream_key)
-      array.map { |i| [i[0], i[1]['json']] } # [ id, json_string ]
+      id = check_backlog ? last_id : '>'
+      array = redis.xreadgroup(redis_stream_group, redis_consumer_name, redis_stream_key, id, count: batch_size).fetch(redis_stream_key, [])
+      array.map! { |i| [i[0], i[1]['json']] } # [ id, json_string ]
+      self.check_backlog = false if array.empty?
+      self.last_id = array.map(&:first).max # TODO proper max
+      array
     end
   end
 
@@ -40,6 +46,7 @@ class Queue
     pool.with do |redis|
       redis.del(redis_stream_key)
     end
+    self.last_id = '0-0'
   end
 
   def len
@@ -51,6 +58,7 @@ class Queue
   private
 
   attr_reader :pool, :batch_size, :maxlen
+  attr_accessor :check_backlog, :last_id
 
   def redis_stream_key
     'bluehaze-events-stream'
@@ -66,10 +74,8 @@ class Queue
 
   def group_exists?
     pool.with do |redis|
-      redis.xinfo(:groups, redis_stream_key).any? { |i| i['name'] == redis_stream_group }
+      redis.exists?(redis_stream_key) && redis.xinfo(:groups, redis_stream_key).any? { |i| i['name'] == redis_stream_group }
     end
-  rescue Redis::CommandError
-    false
   end
 
   def create_group
@@ -83,10 +89,8 @@ class Queue
       pending = redis.xpending(redis_stream_key, redis_stream_group, '-', '+', maxlen)
       ids = pending.map { |i| i['entry_id'] }
       if ids.any?
-        redis.multi do
-          pp "reclaim ids #{ids}"
-          redis.xclaim(redis_stream_key, redis_stream_group, redis_consumer_name, 0, ids, justid: true)
-        end
+        pp "reclaim ids #{ids}"
+        redis.xclaim(redis_stream_key, redis_stream_group, redis_consumer_name, 0, ids, justid: true)
       end
     end
   end
